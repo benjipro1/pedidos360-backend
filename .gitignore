@@ -34,3 +34,6 @@ desktop.ini
 
 # Logs
 *.log
+
+# etc
+CLAUDE.md
