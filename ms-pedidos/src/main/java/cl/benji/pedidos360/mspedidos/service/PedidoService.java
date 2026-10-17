@@ -13,14 +13,17 @@ import cl.benji.pedidos360.mspedidos.exception.PedidoNoEncontradoException;
 import cl.benji.pedidos360.mspedidos.exception.UsuarioNoIdentificadoException;
 import cl.benji.pedidos360.mspedidos.repository.PedidoRepository;
 import org.springframework.stereotype.Service;
+import cl.benji.pedidos360.mspedidos.messaging.PedidoEventPublisher;
 
 @Service
 public class PedidoService {
 
     private final PedidoRepository pedidoRepository;
+    private final PedidoEventPublisher eventPublisher;
 
-    public PedidoService(PedidoRepository pedidoRepository) {
+    public PedidoService(PedidoRepository pedidoRepository, PedidoEventPublisher eventPublisher) {
         this.pedidoRepository = pedidoRepository;
+        this.eventPublisher = eventPublisher;
     }
 
     public List<PedidoResponse> listar(String usuarioEmail) {
@@ -53,13 +56,17 @@ public class PedidoService {
         }
         pedido.setTotal(total);
 
-        return toResponse(pedidoRepository.save(pedido));
+        Pedido guardado = pedidoRepository.save(pedido);
+        eventPublisher.publicarCreacion(guardado);
+        return toResponse(guardado);
     }
 
     public PedidoResponse cambiarEstado(Long id, EstadoPedido nuevoEstado) {
         Pedido pedido = obtenerOLanzar(id);
         pedido.setEstado(nuevoEstado);
-        return toResponse(pedidoRepository.save(pedido));
+        Pedido actualizado = pedidoRepository.save(pedido);
+        eventPublisher.publicarCambioEstado(actualizado);
+        return toResponse(actualizado);
     }
 
     private Pedido obtenerOLanzar(Long id) {
