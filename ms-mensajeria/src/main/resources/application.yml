@@ -1,0 +1,34 @@
+spring:
+  application:
+    name: ms-mensajeria
+  rabbitmq:
+    addresses: localhost:5672,localhost:5673
+    username: admin
+    password: ${RABBITMQ_PASSWORD}
+    listener:
+      simple:
+        prefetch: 1
+        concurrency: 2
+        max-concurrency: 5
+        acknowledge-mode: manual
+
+server:
+  port: 8083
+
+rabbitmq:
+  exchanges:
+    direct: pedidos.direct.exchange
+    topic: pedidos.topic.exchange
+    dlx: pedidos.dlx
+  queues:
+    notificaciones: notificaciones.queue
+    documentos: documentos.queue
+    auditoria: auditoria.queue
+  dlq:
+    notificaciones: notificaciones.dlq
+    documentos: documentos.dlq
+    auditoria: auditoria.dlq
+  routing-keys:
+    pedido-creado: pedido.creado
+    pedido-pagado: pedido.pagado
+    auditoria-pattern: pedido.#
