@@ -19,6 +19,11 @@ import java.time.Instant;
  * - pedido.pagado  -> direct exchange (dispara generacion de documento) + topic (auditoria)
  * - cualquier otro cambio de estado -> solo topic exchange (auditoria), con
  *   routing key "pedido.<estado-en-minuscula>", capturado por el patron pedido.#
+ *
+ * La publicacion es "best effort": si RabbitMQ no esta disponible o falla la
+ * serializacion, el pedido YA fue guardado en la base de datos y esa operacion
+ * no debe fallar por un problema de mensajeria. El error se loguea completo
+ * para poder diagnosticarlo.
  */
 @Component
 public class PedidoEventPublisher {
@@ -37,26 +42,35 @@ public class PedidoEventPublisher {
         PedidoEventoDTO evento = toEvento(pedido);
         String routingKey = props.getRoutingKeys().getPedidoCreado();
 
-        rabbitTemplate.convertAndSend(props.getExchanges().getDirect(), routingKey, evento);
-        rabbitTemplate.convertAndSend(props.getExchanges().getTopic(), routingKey, evento);
-
-        log.info("Evento publicado: pedido {} creado (routingKey={})", pedido.getId(), routingKey);
+        try {
+            rabbitTemplate.convertAndSend(props.getExchanges().getDirect(), routingKey, evento);
+            rabbitTemplate.convertAndSend(props.getExchanges().getTopic(), routingKey, evento);
+            log.info("Evento publicado: pedido {} creado (routingKey={})", pedido.getId(), routingKey);
+        } catch (Exception ex) {
+            log.error("No se pudo publicar el evento de creacion del pedido {} (routingKey={})",
+                    pedido.getId(), routingKey, ex);
+        }
     }
 
     public void publicarCambioEstado(Pedido pedido) {
         PedidoEventoDTO evento = toEvento(pedido);
         String routingKeyAuditoria = "pedido." + pedido.getEstado().name().toLowerCase();
 
-        // Auditoria: SIEMPRE se publica, para cualquier estado
-        rabbitTemplate.convertAndSend(props.getExchanges().getTopic(), routingKeyAuditoria, evento);
-        log.info("Evento publicado: pedido {} cambio a {} (auditoria, routingKey={})",
-                pedido.getId(), pedido.getEstado(), routingKeyAuditoria);
+        try {
+            // Auditoria: SIEMPRE se publica, para cualquier estado
+            rabbitTemplate.convertAndSend(props.getExchanges().getTopic(), routingKeyAuditoria, evento);
+            log.info("Evento publicado: pedido {} cambio a {} (auditoria, routingKey={})",
+                    pedido.getId(), pedido.getEstado(), routingKeyAuditoria);
 
-        // Negocio: solo PAGADO dispara generacion de documento
-        if (pedido.getEstado() == EstadoPedido.PAGADO) {
-            String routingKeyPago = props.getRoutingKeys().getPedidoPagado();
-            rabbitTemplate.convertAndSend(props.getExchanges().getDirect(), routingKeyPago, evento);
-            log.info("Evento publicado: pedido {} pagado (documento, routingKey={})", pedido.getId(), routingKeyPago);
+            // Negocio: solo PAGADO dispara generacion de documento
+            if (pedido.getEstado() == EstadoPedido.PAGADO) {
+                String routingKeyPago = props.getRoutingKeys().getPedidoPagado();
+                rabbitTemplate.convertAndSend(props.getExchanges().getDirect(), routingKeyPago, evento);
+                log.info("Evento publicado: pedido {} pagado (documento, routingKey={})", pedido.getId(), routingKeyPago);
+            }
+        } catch (Exception ex) {
+            log.error("No se pudo publicar el evento de cambio de estado del pedido {} (estado={})",
+                    pedido.getId(), pedido.getEstado(), ex);
         }
     }
 
