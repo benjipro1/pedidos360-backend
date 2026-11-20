@@ -7,6 +7,7 @@ import cl.benji.pedidos360.msproductos.dto.ProductoResponse;
 import cl.benji.pedidos360.msproductos.entity.Producto;
 import cl.benji.pedidos360.msproductos.exception.ProductoNoEncontradoException;
 import cl.benji.pedidos360.msproductos.repository.ProductoRepository;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 
 @Service
@@ -18,8 +19,13 @@ public class ProductoService {
         this.productoRepository = productoRepository;
     }
 
+    /**
+     * Ordenado por id: sin ORDER BY, PostgreSQL devuelve primero las filas no
+     * modificadas, y como el consumidor de Kafka actualiza el stock, el
+     * catalogo cambiaria de orden con cada pedido.
+     */
     public List<ProductoResponse> listar() {
-        return productoRepository.findAll().stream()
+        return productoRepository.findAll(Sort.by("id")).stream()
                 .map(this::toResponse)
                 .toList();
     }
