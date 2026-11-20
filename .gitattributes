@@ -1,0 +1,5 @@
+# Los scripts se ejecutan en Linux (EC2, contenedores): siempre LF, aunque
+# se clone en Windows con core.autocrlf=true y se copien por scp.
+*.sh text eol=lf
+mvnw text eol=lf
+*.cmd text eol=crlf
