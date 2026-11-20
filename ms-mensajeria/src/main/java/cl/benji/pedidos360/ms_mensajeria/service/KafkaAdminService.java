@@ -193,6 +193,10 @@ public class KafkaAdminService {
 
         Set<TopicPartition> todas = new HashSet<>(confirmados.keySet());
         todas.addAll(asignacion.keySet());
+        // Un group sin miembros solo conoce las particiones donde ya confirmo
+        // algo; las demas particiones de esos topicos tambien acumulan lag
+        // aunque el group nunca haya leido de ellas.
+        todas.addAll(particionesDe(todas.stream().map(TopicPartition::topic).collect(Collectors.toSet())));
         Map<TopicPartition, Long> fin = offsets(todas, OffsetSpec.latest());
         // Particiones sin offset confirmado: el group (auto.offset.reset=
         // earliest) partiria del primer mensaje retenido, asi que ese es su lag.
@@ -247,6 +251,27 @@ public class KafkaAdminService {
 
     private Map<String, TopicDescription> describir(Collection<String> nombres) {
         return esperar(adminClient.describeTopics(nombres).allTopicNames());
+    }
+
+    /**
+     * Todas las particiones de los topicos indicados. Un topico que ya no
+     * existe (el group conserva offsets de un topico borrado) se omite en vez
+     * de hacer fallar la consulta completa.
+     */
+    private List<TopicPartition> particionesDe(Set<String> topicos) {
+        if (topicos.isEmpty()) {
+            return List.of();
+        }
+        List<TopicPartition> particiones = new ArrayList<>();
+        adminClient.describeTopics(topicos).topicNameValues().forEach((topico, futuro) -> {
+            try {
+                esperar(futuro).partitions()
+                        .forEach(p -> particiones.add(new TopicPartition(topico, p.partition())));
+            } catch (KafkaAdminException e) {
+                log.warn("No se pudo describir el topico {} al calcular lag: {}", topico, e.getMessage());
+            }
+        });
+        return particiones;
     }
 
     private Map<String, String> configsDe(String nombre) {
