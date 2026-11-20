@@ -20,7 +20,20 @@ BFF Spring Boot :8080   <-- valida el JWT otra vez y aplica roles
    |
    +--> ms-productos :8081 --+
    +--> ms-pedidos   :8082 --+--> PostgreSQL
+            |
+            | (despues de guardar el pedido, best effort)
+            +--> RabbitMQ (2 nodos) --> ms-mensajeria :8083   avisos, documentos, auditoria
+            |
+            +--> Kafka (3 ZK + 3 brokers)
+                   pedidos.eventos ---------> ms-analitica :8084  (group analitica-ventas)
+                   inventario.movimientos --> ms-productos        (group productos-stock: descuenta stock)
+                                         \--> ms-analitica        (group analitica-inventario)
 ```
+
+RabbitMQ y Kafka conviven con roles distintos (ver [Mensajeria](#mensajeria)):
+RabbitMQ reparte **tareas** que se consumen una vez; Kafka guarda un **log de
+eventos** retenido por dias que varios consumer groups leen de forma
+independiente y que se puede releer.
 
 El token se valida dos veces (Gateway y BFF) a propósito: el puerto del BFF
 es alcanzable desde internet, así que una llamada directa a la IP de la EC2
@@ -35,8 +48,13 @@ En desarrollo local no hay API Gateway: Angular llama a `/api/...` y su
 |--------------|--------|-----------------------------------------------------------|
 | bff          | 8080   | Backend for Frontend; valida JWT (OAuth2 Resource Server) |
 | ms-productos | 8081   | Microservicio de catálogo de productos                    |
-| ms-pedidos   | 8082   | Microservicio de pedidos                                  |
+| ms-pedidos   | 8082   | Microservicio de pedidos; productor RabbitMQ y Kafka      |
+| ms-mensajeria| 8083   | Consumidor RabbitMQ; administrador de RabbitMQ y de Kafka |
+| ms-analitica | 8084   | Consumidor Kafka; KPIs de ventas e inventario en tiempo real |
 | PostgreSQL   | 5432   | Base de datos local en Docker; configurable con `DB_PORT` |
+| RabbitMQ     | 5672 / 5673 | AMQP de rabbitmq-1 / rabbitmq-2 (consolas 15672 / 15673) |
+| Kafka        | 9092 / 9093 / 9094 | Brokers kafka-1 / -2 / -3 (Zookeeper solo en la red Docker) |
+| Kafka UI     | 8090   | Administracion y monitoreo del cluster Kafka              |
 
 ## Stack
 
@@ -44,17 +62,32 @@ En desarrollo local no hay API Gateway: Angular llama a `/api/...` y su
 - Spring Boot 4.1.1 (Spring Framework 7, Spring Security 7, Hibernate 7,
   Jackson 3) — la API difiere de los ejemplos típicos de Spring Boot 3.x.
 - PostgreSQL 16 (local con Docker; en producción Amazon RDS)
+- RabbitMQ 4.3.6 (Spring AMQP)
+- Kafka: brokers Confluent Platform 7.9.11 con Zookeeper; clientes Spring
+  Kafka 4.1 / kafka-clients 4.2. Se usa Confluent 7.x porque Kafka 4.x y
+  Confluent 8.x solo soportan KRaft, y la arquitectura pide 3 nodos Zookeeper.
+- Kafka UI: `kafbat/kafka-ui` v1.5.0 (fork mantenido de provectus/kafka-ui)
 - Maven Wrapper (`./mvnw` en Linux/Mac, `.\mvnw.cmd` en Windows PowerShell)
 
 ## Estructura del repositorio
 
 ```
 pedidos360-backend/
-├── ms-productos/        Spring Boot, puerto 8081
-├── ms-pedidos/          Spring Boot, puerto 8082
-├── bff/                 Spring Boot, puerto 8080
-├── docker-compose.yml   PostgreSQL local para desarrollo
-├── .env.example         Variables de referencia (sin valores reales)
+├── bff/                         Spring Boot, puerto 8080
+├── ms-productos/                Spring Boot, puerto 8081
+├── ms-pedidos/                  Spring Boot, puerto 8082
+├── ms-mensajeria/               Spring Boot, puerto 8083
+├── ms-analitica/                Spring Boot, puerto 8084
+├── docker-compose.yml           PostgreSQL local para desarrollo
+├── docker-compose.rabbitmq.yml  Cluster RabbitMQ de 2 nodos
+├── docker-compose.kafka.yml     3 Zookeeper + 3 brokers Kafka
+├── docker-compose.kafka-ui.yml  Kafka UI
+├── infra/
+│   ├── rabbitmq/                Config de formacion del cluster
+│   └── kafka-cloud/             Compose por nodo para las 3 EC2 Kafka
+├── scripts/
+│   └── kafka-crear-topicos.sh   Crea los topicos con sus configs (CLI)
+├── .env.example                 Variables de referencia (sin valores reales)
 ├── .gitignore
 └── README.md
 ```
@@ -88,13 +121,28 @@ Si ya tienes un PostgreSQL instalado en la máquina, define también
 `DB_PORT=5433` y usa ese mismo puerto dentro de `DB_URL` (ver
 [Problemas conocidos](#problemas-conocidos)).
 
-### 2. Levantar PostgreSQL
+### 2. Levantar PostgreSQL, RabbitMQ y Kafka
 
 ```bash
-docker compose up -d
+docker compose up -d                                   # PostgreSQL
+docker compose -f docker-compose.rabbitmq.yml up -d    # RabbitMQ (2 nodos)
+docker compose -f docker-compose.kafka.yml up -d       # 3 Zookeeper + 3 brokers
+docker compose -f docker-compose.kafka-ui.yml up -d    # Kafka UI en http://localhost:8090
 ```
 
-Docker Compose lee `.env` por su cuenta.
+Docker Compose lee `.env` por su cuenta. RabbitMQ necesita
+`RABBITMQ_PASSWORD` y `RABBITMQ_ERLANG_COOKIE`.
+
+Los topicos Kafka los crea ms-mensajeria al arrancar. Si quieres crearlos
+antes (o sin levantar el servicio): `./scripts/kafka-crear-topicos.sh`.
+
+Comprobaciones rapidas:
+
+```bash
+docker exec rabbitmq-1 rabbitmqctl cluster_status                 # 2 nodos
+docker exec zookeeper-1 bash -c "echo srvr | nc localhost 2181"   # Mode: leader/follower
+docker exec kafka-1 kafka-topics --bootstrap-server kafka-1:29092 --describe --topic pedidos.eventos
+```
 
 ### 3. Cargar las variables en la terminal
 
@@ -123,9 +171,11 @@ También puedes definirlas en la configuración de ejecución de tu IDE.
 Una terminal por servicio, cada una con las variables del paso 3:
 
 ```powershell
-cd ms-productos; .\mvnw.cmd spring-boot:run
-cd ms-pedidos;   .\mvnw.cmd spring-boot:run
-cd bff;          .\mvnw.cmd spring-boot:run
+cd ms-mensajeria; .\mvnw.cmd spring-boot:run   # primero: declara colas y topicos
+cd ms-productos;  .\mvnw.cmd spring-boot:run
+cd ms-pedidos;    .\mvnw.cmd spring-boot:run
+cd ms-analitica;  .\mvnw.cmd spring-boot:run
+cd bff;           .\mvnw.cmd spring-boot:run
 ```
 
 En Linux/Mac: `./mvnw spring-boot:run`.
@@ -141,6 +191,8 @@ En el repositorio `pedidos360-frontend`: `npm start`. Queda en
 curl http://localhost:8080/actuator/health   # bff
 curl http://localhost:8081/actuator/health   # ms-productos
 curl http://localhost:8082/actuator/health   # ms-pedidos
+curl http://localhost:8084/actuator/health   # ms-analitica
+curl http://localhost:8083/admin/kafka/cluster   # 3 brokers
 curl http://localhost:8080/api/productos     # debe responder 401 sin token
 ```
 
@@ -160,6 +212,9 @@ reales hay que iniciar sesión desde el frontend.
 | `JWT_AUDIENCE` | bff      | Audiencia esperada en el token                                 |
 | `PRODUCTOS_URL`| bff      | URL de ms-productos                                            |
 | `PEDIDOS_URL`  | bff      | URL de ms-pedidos                                              |
+| `RABBITMQ_PASSWORD` | Docker, ms-pedidos, ms-mensajeria | **Obligatoria.** Clave del usuario `admin` de RabbitMQ |
+| `RABBITMQ_ERLANG_COOKIE` | Docker | **Obligatoria.** Cookie compartida por los nodos del cluster |
+| `KAFKA_BOOTSTRAP_SERVERS` | ms-pedidos, ms-productos, ms-mensajeria, ms-analitica | Brokers Kafka (por defecto `localhost:9092,localhost:9093,localhost:9094`) |
 
 Los valores de `JWT_*` tienen defaults en `application.properties` porque no
 son secretos: identifican al tenant y a la aplicación, no autentican nada por
@@ -268,6 +323,112 @@ Notas:
   enviando `activo: true`.
 - Estados de pedido: `PENDIENTE`, `PAGADO`, `ENVIADO`, `CANCELADO`.
 
+## Mensajeria
+
+La publicacion en ambos brokers es **best effort**: el pedido se guarda
+primero y una falla de RabbitMQ o Kafka se registra en el log, pero nunca
+revierte el pedido ni devuelve un 500.
+
+### RabbitMQ (Parcial 2)
+
+ms-pedidos publica `pedido.creado`, `pedido.pagado` y cada cambio de estado.
+ms-mensajeria declara la topologia (`TopologyInitializer`) y consume:
+
+| Recurso | Tipo | Uso |
+|---|---|---|
+| `pedidos.direct.exchange` | direct | `pedido.creado` -> notificaciones, `pedido.pagado` -> documentos |
+| `pedidos.topic.exchange` | topic (`pedido.#`) | auditoria de todo cambio |
+| `pedidos.dlx` | direct | dead-letter: `notificaciones.dlq`, `documentos.dlq`, `auditoria.dlq` |
+
+Listeners con ACK manual, `prefetch: 1` y `concurrency: 2`. Administracion en
+`/admin/rabbitmq` (exchanges, colas y bindings).
+
+### Kafka (EP5)
+
+**Topicos** (los declara ms-mensajeria en `application.yml`; alternativa CLI
+en `scripts/kafka-crear-topicos.sh`):
+
+| Topico | Key | Productor | Consumer groups | Configuracion |
+|---|---|---|---|---|
+| `pedidos.eventos` | pedidoId | ms-pedidos | `analitica-ventas` (ms-analitica) | 3 particiones, RF 3, `min.insync.replicas=2`, `delete`, retencion 7 dias |
+| `inventario.movimientos` | productoId | ms-pedidos (uno por linea) | `productos-stock` (ms-productos), `analitica-inventario` (ms-analitica) | 3 particiones, RF 3, `min.insync.replicas=2`, `delete`, retencion 30 dias |
+| `*.DLT` | igual al original | error handler de cada consumidor | — | 3 particiones, RF 3, retencion 30 dias |
+
+- **Key = orden**: todos los eventos de un pedido (o de un producto) van a la
+  misma particion, asi que se consumen en el orden en que ocurrieron.
+- **3 particiones**: hasta 3 consumidores en paralelo por group (un hilo por
+  particion, `concurrency=3`).
+- **RF 3 + `min.insync.replicas=2` + `acks=all`**: un mensaje confirmado esta
+  en al menos 2 brokers; el cluster sigue funcionando si cae 1 broker.
+  Los topicos internos (`__consumer_offsets`) tambien tienen RF 3.
+- **Dos groups sobre `inventario.movimientos`**: ambos reciben todos los
+  mensajes (broadcast entre groups); dentro de cada group las particiones se
+  reparten entre sus consumidores (balanceo).
+
+**Eventos** (JSON, sin cabeceras de tipo: cada servicio deserializa a su
+propio DTO):
+
+```json
+// pedidos.eventos
+{ "eventId": "uuid", "tipo": "PEDIDO_CREADO | PEDIDO_ESTADO_CAMBIADO", "version": 1,
+  "fechaEvento": "...", "pedidoId": 8, "usuarioEmail": "...", "estado": "PAGADO",
+  "estadoAnterior": "PENDIENTE", "total": 6565, "fechaCreacion": "...",
+  "items": [{ "productoId": 1, "nombreProducto": "...", "cantidad": 1, "precioUnitario": 6565 }] }
+
+// inventario.movimientos
+{ "eventId": "uuid", "tipo": "SALIDA_VENTA | DEVOLUCION_CANCELACION", "version": 1,
+  "fechaEvento": "...", "productoId": 1, "nombreProducto": "...", "cantidad": 1, "pedidoId": 8 }
+```
+
+**Stock**: un pedido compromete stock mientras no este `CANCELADO`. Crear un
+pedido publica una `SALIDA_VENTA` por linea; cancelarlo, una
+`DEVOLUCION_CANCELACION`. ms-productos aplica cada movimiento una sola vez
+(deduplica por `eventId` en la tabla `movimientos_procesados`); si no hay
+stock suficiente descuenta hasta 0 y registra una alerta, y una devolucion
+nunca devuelve mas de lo que realmente se desconto.
+
+**Analitica**: ms-analitica mantiene los KPIs en memoria y, al arrancar,
+relee los topicos desde el inicio (replay) para reconstruirlos. `GET
+/analitica/resumen` devuelve ventas totales, pedidos por estado, ticket
+promedio y productos mas vendidos.
+
+**Errores en los consumidores**:
+
+- `ErrorHandlingDeserializer`: un mensaje que no es JSON valido no bloquea la
+  particion.
+- Validacion del payload (Bean Validation) antes de procesar; logs con
+  topico, particion, offset, key y `eventId`.
+- `DefaultErrorHandler`: 3 reintentos con espera exponencial (1 s, 2 s, 4 s);
+  los eventos invalidos y los errores de deserializacion no se reintentan.
+  Agotados los reintentos, el mensaje va a `<topico>.DLT`.
+
+**Administracion** (`ms-mensajeria`, `/admin/kafka`):
+
+| Metodo | Ruta | Accion |
+|---|---|---|
+| GET | `/cluster` | Brokers y controller |
+| GET | `/topics?internos=false` | Listar topicos |
+| GET | `/topics/{nombre}` | Particiones (lider, replicas, ISR, offsets) y configs |
+| POST | `/topics` | Crear `{nombre, particiones, replicas, configs}` |
+| DELETE | `/topics/{nombre}` | Eliminar |
+| PATCH | `/topics/{nombre}/configs` | `{set: {...}, eliminar: [...]}` (incrementalAlterConfigs) |
+| POST | `/topics/{nombre}/particiones` | `{total}` (solo aumentar) |
+| GET | `/consumer-groups` | Listar groups y su estado |
+| GET | `/consumer-groups/{id}` | Miembros, asignacion, offsets y lag por particion |
+| POST | `/consumer-groups/{id}/reset-offsets` | `{topico, posicion: INICIO\|FIN}` (group detenido) |
+| DELETE | `/consumer-groups/{id}` | Eliminar group |
+
+Igual que `/admin/rabbitmq`, no tiene autenticacion propia: se protege por
+red (puerto 8083 cerrado en el security group, acceso por tunel SSH).
+
+### Kafka en la nube
+
+Cada par Zookeeper + broker corre en su propia EC2 t3.small
+(`infra/kafka-cloud/docker-compose.nodo.yml`, `network_mode: host`, IP
+privadas). Kafka UI corre en la EC2 kafka-1
+(`infra/kafka-cloud/docker-compose.kafka-ui.yml`). En los microservicios
+basta con definir `KAFKA_BOOTSTRAP_SERVERS=<ip1>:9092,<ip2>:9092,<ip3>:9092`.
+
 ## Datos
 
 `ms-productos` siembra ocho productos desde `data.sql` (uno inactivo, a
@@ -302,8 +463,16 @@ Nueve tests en el BFF: validación de audience (token correcto, múltiples
 audiencias, audiencia ajena, sin claim `aud`), autorización por ruta y rol, y
 que todo 401 lleve cuerpo JSON.
 
-`ms-productos` y `ms-pedidos` no traen tests propios; se validan levantándolos
-contra la base.
+Pruebas unitarias de la mensajeria Kafka (no necesitan infraestructura):
+
+```powershell
+cd ms-pedidos;   .\mvnw.cmd test -Dtest=KafkaEventPublisherTest   # salidas, devoluciones, best effort
+cd ms-productos; .\mvnw.cmd test -Dtest=StockServiceTest          # stock, piso 0, idempotencia
+cd ms-analitica; .\mvnw.cmd test                                  # KPIs, duplicados, replay
+```
+
+Los `contextLoads` de ms-productos y ms-pedidos necesitan PostgreSQL arriba
+(paso 2) y las variables del paso 3.
 
 ## Problemas conocidos
 
@@ -389,7 +558,7 @@ arriba en el log el error real (autenticación, puerto o `DB_PASS` sin definir).
 
 - No se suben secretos, `target/`, ni archivos de IDE (ver `.gitignore`).
 - Sin client secrets: el cliente es una SPA pública con PKCE.
-- Sin Lombok.
+- Sin Lombok, salvo en ms-mensajeria, que ya lo usaba desde la Parcial 2.
 - Sin frameworks extra (ni Spring Cloud Gateway, ni Eureka, ni Feign): el
   gateway es AWS API Gateway y las llamadas internas van con `RestClient`.
 - Antes de instalar cualquier dependencia nueva, preguntar.
