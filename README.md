@@ -429,6 +429,11 @@ privadas). Kafka UI corre en la EC2 kafka-1
 (`infra/kafka-cloud/docker-compose.kafka-ui.yml`). En los microservicios
 basta con definir `KAFKA_BOOTSTRAP_SERVERS=<ip1>:9092,<ip2>:9092,<ip3>:9092`.
 
+El despliegue completo en AWS (EC2, RDS, Kafka, API Gateway, frontend y
+Entra ID), su operación diaria y los problemas conocidos están en
+[docs/runbook-despliegue-aws.md](docs/runbook-despliegue-aws.md). Los
+scripts que usa están en `infra/aws/`.
+
 ## Datos
 
 `ms-productos` siembra ocho productos desde `data.sql` (uno inactivo, a
