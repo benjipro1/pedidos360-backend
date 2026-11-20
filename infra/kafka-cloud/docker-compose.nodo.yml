@@ -1,0 +1,57 @@
+# Un nodo del cluster Kafka en la nube: 1 Zookeeper + 1 broker por EC2
+# (pedidos360-kafka-1, -2 y -3, todas t3.small).
+#
+# En cada EC2:
+#   cp .env.example .env      (NODO_ID, NODO_IP y las 3 IP privadas)
+#   docker compose -f docker-compose.nodo.yml up -d
+#
+# network_mode: host -> Zookeeper y el broker escuchan directo en la IP
+# privada de la instancia, que se conserva al detener/iniciar la EC2. Asi
+# el ensamble Zookeeper (2888/3888) y el broker (9092) se ven entre EC2 sin
+# NAT de Docker. Puertos que el security group "pedidos360-kafka" debe
+# permitir SOLO entre los nodos Kafka: 2181, 2888, 3888 y 9092; y 9092
+# desde el security group de la EC2 backend. Nada abierto a internet.
+#
+# Al reiniciar el Learner Lab las instancias vuelven a arrancar y
+# restart: unless-stopped levanta de nuevo ambos contenedores.
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.9.11
+    container_name: zookeeper-${NODO_ID:?definir NODO_ID (1, 2 o 3) en .env}
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      ZOOKEEPER_SERVER_ID: ${NODO_ID}
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_INIT_LIMIT: 10
+      ZOOKEEPER_SYNC_LIMIT: 5
+      ZOOKEEPER_SERVERS: ${KAFKA_1_IP:?definir KAFKA_1_IP}:2888:3888;${KAFKA_2_IP:?definir KAFKA_2_IP}:2888:3888;${KAFKA_3_IP:?definir KAFKA_3_IP}:2888:3888
+      KAFKA_HEAP_OPTS: ${ZOOKEEPER_HEAP_OPTS:--Xms128m -Xmx256m}
+      KAFKA_OPTS: -Dzookeeper.admin.enableServer=false
+
+  kafka:
+    image: confluentinc/cp-kafka:7.9.11
+    container_name: kafka-${NODO_ID}
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: ${NODO_ID}
+      KAFKA_ZOOKEEPER_CONNECT: ${KAFKA_1_IP}:2181,${KAFKA_2_IP}:2181,${KAFKA_3_IP}:2181
+      # Un solo listener: brokers, Kafka UI y microservicios usan la IP
+      # privada de cada nodo.
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://${NODO_IP:?definir NODO_IP (IP privada de esta EC2)}:9092
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_UNCLEAN_LEADER_ELECTION_ENABLE: "false"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 3000
+      KAFKA_HEAP_OPTS: ${KAFKA_HEAP_OPTS:--Xms256m -Xmx512m}

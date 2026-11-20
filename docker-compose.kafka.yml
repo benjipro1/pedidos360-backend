@@ -1,0 +1,132 @@
+# Arquitectura Kafka de Pedidos360 (EP5): 3 nodos Zookeeper + 3 brokers.
+#
+#   docker compose -f docker-compose.kafka.yml up -d
+#   ./scripts/kafka-crear-topicos.sh            (opcional: ms-mensajeria
+#                                                tambien los crea al arrancar)
+#
+# Este archivo levanta los 6 nodos en una sola maquina (desarrollo local y
+# evidencia). En la nube cada par Zookeeper + broker corre en su propia EC2:
+# ver infra/kafka-cloud/.
+#
+# Por que Confluent 7.9 y no Kafka 4 / Confluent 8: esas versiones solo
+# soportan KRaft (sin Zookeeper) y la pauta exige 3 nodos Zookeeper. Los
+# clientes Kafka 4.x de Spring Kafka 4 son compatibles con brokers 3.x.
+#
+# Listeners de cada broker:
+#   INTERNAL  kafka-N:29092  -> trafico entre brokers y Kafka UI (red Docker)
+#   EXTERNAL  localhost:909N -> microservicios que corren en el host
+#
+# Kafka UI va en un compose aparte (docker-compose.kafka-ui.yml) y se une a
+# la red "pedidos360-kafka" que crea este archivo.
+
+x-zookeeper: &zookeeper
+  image: confluentinc/cp-zookeeper:7.9.11
+  restart: unless-stopped
+  networks:
+    - kafka
+
+x-zookeeper-env: &zookeeper-env
+  ZOOKEEPER_CLIENT_PORT: 2181
+  ZOOKEEPER_TICK_TIME: 2000
+  ZOOKEEPER_INIT_LIMIT: 10
+  ZOOKEEPER_SYNC_LIMIT: 5
+  # Ensamble de 3: el quorum es 2, asi que tolera la caida de 1 nodo.
+  ZOOKEEPER_SERVERS: zookeeper-1:2888:3888;zookeeper-2:2888:3888;zookeeper-3:2888:3888
+  KAFKA_HEAP_OPTS: ${ZOOKEEPER_HEAP_OPTS:--Xms128m -Xmx256m}
+  # Sin AdminServer HTTP (puerto 8080): no se usa y ahorra memoria.
+  KAFKA_OPTS: -Dzookeeper.admin.enableServer=false
+
+x-kafka: &kafka
+  image: confluentinc/cp-kafka:7.9.11
+  restart: unless-stopped
+  depends_on:
+    - zookeeper-1
+    - zookeeper-2
+    - zookeeper-3
+  networks:
+    - kafka
+
+x-kafka-env: &kafka-env
+  KAFKA_ZOOKEEPER_CONNECT: zookeeper-1:2181,zookeeper-2:2181,zookeeper-3:2181
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+  KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+  # Los topicos se crean de forma explicita (ms-mensajeria o el script),
+  # nunca por accidente al publicar en un nombre mal escrito.
+  KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+  KAFKA_NUM_PARTITIONS: 3
+  KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+  KAFKA_MIN_INSYNC_REPLICAS: 2
+  # Topicos internos tambien con 3 replicas: si __consumer_offsets quedara
+  # con RF 1, apagar el broker que lo aloja detendria a los consumidores
+  # aunque los topicos de negocio sigan disponibles.
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+  KAFKA_UNCLEAN_LEADER_ELECTION_ENABLE: "false"
+  KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 3000
+  KAFKA_HEAP_OPTS: ${KAFKA_HEAP_OPTS:--Xms256m -Xmx512m}
+
+services:
+  zookeeper-1:
+    <<: *zookeeper
+    container_name: zookeeper-1
+    hostname: zookeeper-1
+    environment:
+      <<: *zookeeper-env
+      ZOOKEEPER_SERVER_ID: 1
+
+  zookeeper-2:
+    <<: *zookeeper
+    container_name: zookeeper-2
+    hostname: zookeeper-2
+    environment:
+      <<: *zookeeper-env
+      ZOOKEEPER_SERVER_ID: 2
+
+  zookeeper-3:
+    <<: *zookeeper
+    container_name: zookeeper-3
+    hostname: zookeeper-3
+    environment:
+      <<: *zookeeper-env
+      ZOOKEEPER_SERVER_ID: 3
+
+  kafka-1:
+    <<: *kafka
+    container_name: kafka-1
+    hostname: kafka-1
+    ports:
+      - "9092:9092"
+    environment:
+      <<: *kafka-env
+      KAFKA_BROKER_ID: 1
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-1:29092,EXTERNAL://localhost:9092
+
+  kafka-2:
+    <<: *kafka
+    container_name: kafka-2
+    hostname: kafka-2
+    ports:
+      - "9093:9093"
+    environment:
+      <<: *kafka-env
+      KAFKA_BROKER_ID: 2
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-2:29092,EXTERNAL://localhost:9093
+
+  kafka-3:
+    <<: *kafka
+    container_name: kafka-3
+    hostname: kafka-3
+    ports:
+      - "9094:9094"
+    environment:
+      <<: *kafka-env
+      KAFKA_BROKER_ID: 3
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9094
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-3:29092,EXTERNAL://localhost:9094
+
+networks:
+  kafka:
+    name: pedidos360-kafka
