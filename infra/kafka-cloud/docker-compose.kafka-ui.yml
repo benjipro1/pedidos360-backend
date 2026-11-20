@@ -1,0 +1,18 @@
+# Kafka UI en la nube. Corre solo en la EC2 pedidos360-kafka-1, junto a su
+# nodo. Puerto 8090 cerrado en el security group: se abre por tunel SSH.
+#
+#   docker compose -f docker-compose.kafka-ui.yml up -d
+#   (desde tu equipo) ssh -L 8090:<IP privada kafka-1>:8090 ... -> http://localhost:8090
+
+services:
+  kafka-ui:
+    image: kafbat/kafka-ui:v1.5.0
+    container_name: kafka-ui
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      SERVER_PORT: 8090
+      KAFKA_CLUSTERS_0_NAME: pedidos360
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: ${KAFKA_1_IP:?definir KAFKA_1_IP}:9092,${KAFKA_2_IP:?definir KAFKA_2_IP}:9092,${KAFKA_3_IP:?definir KAFKA_3_IP}:9092
+      KAFKA_CLUSTERS_0_READONLY: "false"
+      JAVA_OPTS: ${KAFKA_UI_JAVA_OPTS:--Xms128m -Xmx256m}

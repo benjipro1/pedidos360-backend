@@ -13,6 +13,7 @@ import cl.benji.pedidos360.mspedidos.exception.PedidoNoEncontradoException;
 import cl.benji.pedidos360.mspedidos.exception.UsuarioNoIdentificadoException;
 import cl.benji.pedidos360.mspedidos.repository.PedidoRepository;
 import org.springframework.stereotype.Service;
+import cl.benji.pedidos360.mspedidos.messaging.KafkaEventPublisher;
 import cl.benji.pedidos360.mspedidos.messaging.PedidoEventPublisher;
 
 @Service
@@ -20,10 +21,13 @@ public class PedidoService {
 
     private final PedidoRepository pedidoRepository;
     private final PedidoEventPublisher eventPublisher;
+    private final KafkaEventPublisher kafkaEventPublisher;
 
-    public PedidoService(PedidoRepository pedidoRepository, PedidoEventPublisher eventPublisher) {
+    public PedidoService(PedidoRepository pedidoRepository, PedidoEventPublisher eventPublisher,
+                         KafkaEventPublisher kafkaEventPublisher) {
         this.pedidoRepository = pedidoRepository;
         this.eventPublisher = eventPublisher;
+        this.kafkaEventPublisher = kafkaEventPublisher;
     }
 
     public List<PedidoResponse> listar(String usuarioEmail) {
@@ -58,14 +62,17 @@ public class PedidoService {
 
         Pedido guardado = pedidoRepository.save(pedido);
         eventPublisher.publicarCreacion(guardado);
+        kafkaEventPublisher.publicarCreacion(guardado);
         return toResponse(guardado);
     }
 
     public PedidoResponse cambiarEstado(Long id, EstadoPedido nuevoEstado) {
         Pedido pedido = obtenerOLanzar(id);
+        EstadoPedido estadoAnterior = pedido.getEstado();
         pedido.setEstado(nuevoEstado);
         Pedido actualizado = pedidoRepository.save(pedido);
         eventPublisher.publicarCambioEstado(actualizado);
+        kafkaEventPublisher.publicarCambioEstado(actualizado, estadoAnterior);
         return toResponse(actualizado);
     }
 

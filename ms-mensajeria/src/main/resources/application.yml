@@ -32,3 +32,62 @@ rabbitmq:
     pedido-creado: pedido.creado
     pedido-pagado: pedido.pagado
     auditoria-pattern: pedido.#
+
+# --- Kafka (EP5): ms-mensajeria es el ADMINISTRADOR de Kafka ---
+# Solo usa el AdminClient (no produce ni consume): declara los topicos al
+# arrancar y expone /admin/kafka para administrarlos.
+---
+spring:
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092,localhost:9093,localhost:9094}
+    client-id: ms-mensajeria-admin
+    admin:
+      # Alinea las configs de topicos existentes con las declaradas abajo.
+      modify-topic-configs: true
+      # Si Kafka no esta disponible al arrancar, el servicio igual levanta
+      # (RabbitMQ no depende de Kafka); los topicos se crean en el proximo
+      # arranque o con scripts/kafka-crear-topicos.sh.
+      fail-fast: false
+      operation-timeout: 15s
+      properties:
+        # Si cae un broker, una peticion que iba hacia el se abandona a los
+        # 5 s y se reintenta contra el nuevo lider, dentro de los 15 s que
+        # espera KafkaAdminService (el default de 30 s no alcanzaba).
+        request.timeout.ms: 5000
+        default.api.timeout.ms: 12000
+        # Detecta rapido un broker que no acepta conexiones.
+        socket.connection.setup.timeout.ms: 2000
+        socket.connection.setup.timeout.max.ms: 4000
+
+kafka:
+  topicos:
+    - nombre: pedidos.eventos
+      particiones: 3
+      replicas: 3
+      configs:
+        "[cleanup.policy]": delete
+        "[retention.ms]": "604800000"      # 7 dias
+        "[min.insync.replicas]": "2"
+    - nombre: inventario.movimientos
+      particiones: 3
+      replicas: 3
+      configs:
+        "[cleanup.policy]": delete
+        "[retention.ms]": "2592000000"     # 30 dias
+        "[min.insync.replicas]": "2"
+    # Dead letter topics: mismas 3 particiones que el original (el recoverer
+    # publica en la misma particion de origen).
+    - nombre: pedidos.eventos.DLT
+      particiones: 3
+      replicas: 3
+      configs:
+        "[cleanup.policy]": delete
+        "[retention.ms]": "2592000000"
+        "[min.insync.replicas]": "2"
+    - nombre: inventario.movimientos.DLT
+      particiones: 3
+      replicas: 3
+      configs:
+        "[cleanup.policy]": delete
+        "[retention.ms]": "2592000000"
+        "[min.insync.replicas]": "2"
